@@ -1,0 +1,286 @@
+#!/usr/local/bin/bash
+# Certificate Extraction Tool from pfSense Firewall
+
+set -e
+#Display pfSense Logo
+cat /usr/local/share/pfSense/ascii-art/pfsense-logo-small.txt
+echo "Certificate Export Tool for pfSense"
+
+#pfSense Config and XML Tool
+XMLLINT=/usr/local/bin/xmllint 
+PFSENSE_CONF=/cf/conf/config.xml
+BASE64_DECODE='/usr/local/bin/python3.9 -m base64 -d'
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+#Extract Certificates and CA Ceritifcates IDs
+CAIDS=$("$XMLLINT" -nocdata --xpath "/pfsense/ca/refid/text()" "$PFSENSE_CONF")
+CERTIDS=$("$XMLLINT" --nocdata --xpath "/pfsense/cert/refid/text()" "$PFSENSE_CONF")
+
+#List CA's
+list_ca() {    
+    mapfile -t cas < <(printf "%s\n" "`echo "$CAIDS"`")
+    printf "%s\n" "`echo --------CA Certificates--------`"
+        for i in "${!cas[@]}"; do
+            printf "(%s) %s: %s\n" "$i" "${cas[$i]}" `"$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '${cas[$i]}']]/descr/text()" "$PFSENSE_CONF"` 
+        done
+    printf "%s\n" "`echo -------------------------------`"
+}
+
+#List Certificates
+list_cert() {   
+    mapfile -t certs < <(printf "%s\n" "`echo "$CERTIDS"`")
+    printf "%s\n" "`echo --------Certificates--------`"
+        for i in "${!certs[@]}"; do
+            printf "(%s) %s: %s\n" "$i" "${certs[$i]}" `"$XMLLINT" --nocdata --xpath "/pfsense/cert[refid[normalize-space(.) = '${certs[$i]}']]/descr/text()" "$PFSENSE_CONF"`
+        done
+    printf "%s\n" "`echo ----------------------------`"
+}
+
+#Extract Private Key CA Certificate
+ca_extract_private_key() {
+    local XPATH id KEY XPATH
+    id=$1
+    XPATH="/pfsense/ca[refid[normalize-space(.) = '$id']]/prv/text()"
+    KEY=$("$XMLLINT" --nocdata --xpath "$XPATH" "$PFSENSE_CONF")
+    echo -e $KEY | $BASE64_DECODE > "$id"_key.pem
+    printf "CA Certificate Key saved in: %s/%s\n" "$SCRIPT_DIR" "$id"_key.pem
+}
+
+#Extract CA Certificate
+ca_extract_certificate() {
+    local XPATH id CERT XPATH
+    id=$1
+    XPATH="/pfsense/ca[refid[normalize-space(.) = '$id']]/crt/text()"
+    CERT=$("$XMLLINT" --nocdata --xpath "$XPATH" "$PFSENSE_CONF")
+    echo -e $CERT | $BASE64_DECODE > "$id"_crt.pem
+    printf "CA Certificate saved in: %s/%s\n" "$SCRIPT_DIR" "$id"_crt.pem
+}
+
+#Extract Certificate Private Key
+cert_extract_private_key() {
+    local XPATH id KEY XPATH
+    id=$1
+    XPATH="/pfsense/cert[refid[normalize-space(.) = '$id']]/prv/text()"
+    KEY=$("$XMLLINT" --nocdata --xpath "$XPATH" "$PFSENSE_CONF")
+    echo -e $KEY | $BASE64_DECODE > "$id"_key.pem
+    printf "Certificate Key saved in: %s/%s\n" "$SCRIPT_DIR" "$id"_key.pem
+}
+
+#Extract Certificate
+cert_extract_certificate() {
+    local XPATH id CERT XPATH
+    id=$1
+    XPATH="/pfsense/cert[refid[normalize-space(.) = '$id']]/crt/text()"
+    CERT=$("$XMLLINT" --nocdata --xpath "$XPATH" "$PFSENSE_CONF")
+    echo -e $CERT | $BASE64_DECODE > "$id"_crt.pem
+    printf "Certificate saved in: %s/%s\n" "$SCRIPT_DIR" "$id"_crt.pem
+}
+
+#Extract Chain Certificate
+cert_extract_chain() {
+    local status XPATH_CA_TEXT XPATH_CA_DEP XPATH_CERT_TEXT XPATH_CERT_DEP id CERT CERT_DEP CA CA_ID 
+    id=$1
+    
+    XPATH_CERT_TEXT="/pfsense/cert[refid[normalize-space(.) = '$id']]/crt/text()"
+    XPATH_CERT_DEP="/pfsense/cert[refid[normalize-space(.) = '$id']]/caref/text()"
+    
+
+    CERT=$("$XMLLINT" --nocdata --xpath "$XPATH_CERT_TEXT" "$PFSENSE_CONF")
+    CERT_DEP=$("$XMLLINT" --nocdata --xpath "$XPATH_CERT_DEP" "$PFSENSE_CONF")
+    mapfile -t chain_certs < <(printf "%s\n" "`echo "$CERT" | $BASE64_DECODE`")
+    
+    XPATH_CA_TEXT="/pfsense/ca[refid[normalize-space(.) = '$CERT_DEP']]/crt/text()"
+    XPATH_CA_DEP="/pfsense/ca[refid[normalize-space(.) = '$CERT_DEP']]/caref/text()"
+
+    CA=$("$XMLLINT" --nocdata --xpath "$XPATH_CA_TEXT" "$PFSENSE_CONF")
+    mapfile -t -O "${#chain_certs[@]}" chain_certs < <(printf "%s\n" "`echo "$CA" | $BASE64_DECODE`")
+    
+    CA_ID=$(echo "$CERT_DEP")
+
+
+while true;
+do
+
+"$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$CA_ID']]/caref/text()" "$PFSENSE_CONF" &> /dev/null || status="$?"
+	case $status in
+	10)
+        break
+        ;;
+	"")
+        CA_ID=$("$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$CA_ID']]/caref/text()" "$PFSENSE_CONF")
+        CA=$("$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$CA_ID']]/crt/text()" "$PFSENSE_CONF")
+        mapfile -t -O "${#chain_certs[@]}" chain_certs < <(printf "%s\n" "`echo "$CA" | $BASE64_DECODE `")
+        
+        "$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$CA_ID']]/caref/text()" "$PFSENSE_CONF" &> /dev/null || status="$?"
+	        case $status in
+	        10)
+                break
+                ;;
+	        "")
+                CA_ID=$("$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$CA_ID']]/caref/text()" "$PFSENSE_CONF")
+                CA=$("$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$CA_ID']]/crt/text()" "$PFSENSE_CONF")
+                mapfile -t -O "${#chain_certs[@]}" chain_certs < <(printf "%s\n" "`echo "$CA" | $BASE64_DECODE `")
+                ;;
+	        esac 
+        ;;
+	esac  
+done
+
+for i in "${!chain_certs[@]}"; do
+    printf "%s\n" "${chain_certs[$i]}" >> "$id"_chain.pem
+done
+
+printf "Chain Certificate saved in: %s/%s\n" "$SCRIPT_DIR" "$id"_chain.pem
+
+}
+
+#Generate Extract CA Certificate Menu
+ca_extract_menu() {
+local id=$1 
+
+certname=$("$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '$id']]/descr/text()" "$PFSENSE_CONF")
+
+echo "
+Selected certificate $id - $certname :
+Available options:
+1) Certificate file
+2) Certificate Key
+0) Exit
+Choose an option:  "
+    read -r ans
+    case $ans in
+    1)
+        ca_extract_certificate "$id"
+        ca_extract_menu "$id"
+        ;;
+    2)
+        ca_extract_private_key "$id"
+        ca_extract_menu "$id"
+        ;;
+    0)
+        main_menu
+        ;;
+    *)
+        echo "Wrong option."
+        ca_extract_menu "$id"
+        ;;
+    esac
+
+}
+
+#Generate Extract Certificate Menu
+cert_extract_menu() {
+local id=$1 
+
+certname=$("$XMLLINT" --nocdata --xpath "/pfsense/cert[refid[normalize-space(.) = '$id']]/descr/text()" "$PFSENSE_CONF")
+
+echo "
+Selected certificate $id - $certname :
+Available options:
+1) Certificate file
+2) Certificate Key
+3) Chain Certificate
+0) Exit
+Choose an option:  "
+    read -r ans
+    case $ans in
+    1)
+        cert_extract_certificate "$id"  
+        cert_extract_menu "$id"
+        ;;
+    2)
+        cert_extract_private_key "$id"  
+        cert_extract_menu "$id"
+        ;;
+    3)
+        cert_extract_chain "$id"
+        cert_extract_menu "$id"
+        ;;
+    0)
+        main_menu
+        ;;
+
+
+    *)
+        echo "Wrong option."
+        cert_extract_menu "$id"
+        ;;
+    esac
+
+
+}
+
+#Generate main extract menu
+extract_menu() {
+local status selected status1
+mapfile -t certs < <(printf "%s\n" "`echo "$CAIDS"`")
+mapfile -t -O "${#certs[@]}" certs < <(printf "%s\n" "`echo "$CERTIDS"`")
+
+for i in "${!certs[@]}"; do
+"$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '${certs[$i]}']]/descr/text()" "$PFSENSE_CONF" &> /dev/null || status="$?"
+	case $status in
+	10)
+        printf "(%s) %s: %s\n" "$i" "${certs[$i]}" `"$XMLLINT" --nocdata --xpath "/pfsense/cert[refid[normalize-space(.) = '${certs[$i]}']]/descr/text()" "$PFSENSE_CONF"`
+        ;;
+	"")
+        printf "(%s) %s: %s\n" "$i" "${certs[$i]}" `"$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '${certs[$i]}']]/descr/text()" "$PFSENSE_CONF"`
+        ;;
+	esac   	
+
+done
+
+printf 'Select an certificate from the above list: '
+IFS= read -r opt
+
+if [[ $opt =~ ^[0-9]+$ ]] && (( (opt >= 0) && (opt <= "${#certs[@]}") )); then
+"$XMLLINT" --nocdata --xpath "/pfsense/ca[refid[normalize-space(.) = '${certs[$opt]}']]/descr/text()" "$PFSENSE_CONF" &> /dev/null || status1="$?"
+        case $status1 in
+        10)
+            cert_extract_menu "${certs[$opt]}"
+            ;;
+        "")
+            ca_extract_menu "${certs[$opt]}"
+            ;;
+        esac
+else
+    printf 'Option not available!\n'
+    extract_menu
+fi
+}
+
+#Main Menu
+main_menu() {
+echo "
+Available options: 
+1) List CA Certificates
+2) List Certificates
+3) Extract Certificates
+0) Exit
+Choose an option:  "
+    read -r ans
+    case $ans in
+    1)
+        list_ca
+	    main_menu
+        ;;
+    2)
+        list_cert
+        main_menu
+        ;;
+    3)
+        extract_menu
+        ;;
+    0)
+        echo "Exiting Tool"
+        exit 0
+        ;;
+    *)
+        echo "Wrong option."
+        main_menu
+        ;;
+    esac
+}
+
+#Run Main Menu
+main_menu
